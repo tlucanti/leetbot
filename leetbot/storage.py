@@ -1,11 +1,26 @@
-"""A single JSON mapping of usernames to problem IDs and completion times."""
+"""A single JSON mapping of usernames to completed problems."""
 
+from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
 import tempfile
 
 from .leetcode import validate_username
+
+
+@dataclass(frozen=True)
+class Completion:
+    completed_at: int
+    difficulty: str | None
+
+    def __post_init__(self):
+        if type(self.completed_at) is not int or self.completed_at < 0:
+            raise ValueError("Completion time must be a nonnegative Unix timestamp")
+        if self.difficulty not in ("Easy", "Medium", "Hard", None):
+            raise ValueError("Invalid problem difficulty")
+        if self.completed_at > 0 and self.difficulty is None:
+            raise ValueError("A dated completion must include its difficulty")
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -27,7 +42,7 @@ class TrackingStore:
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True)
         self.state_path = directory / "state.json"
-        self._solved: dict[str, dict[str, int]] = {}
+        self._solved: dict[str, dict[str, Completion]] = {}
         if not self.state_path.exists():
             self._save({})
             return
@@ -38,18 +53,17 @@ class TrackingStore:
             for username, completions in payload.items():
                 if validate_username(username) != username or self.contains(username):
                     raise ValueError("Invalid or duplicate username")
-                if not isinstance(completions, dict) or any(
-                    not isinstance(problem_id, str)
-                    or not problem_id.strip()
-                    or type(completed_at) is not int
-                    or completed_at < 0
-                    for problem_id, completed_at in completions.items()
-                ):
-                    raise ValueError("Expected problem IDs mapped to Unix completion timestamps")
-                self._solved[username] = dict(completions)
+                if not isinstance(completions, dict):
+                    raise ValueError("Expected problem IDs mapped to completion records")
+                tasks = {}
+                for problem_id, record in completions.items():
+                    if not isinstance(problem_id, str) or not problem_id.strip() or not isinstance(record, dict):
+                        raise ValueError("Invalid problem ID or completion record")
+                    tasks[problem_id] = Completion(**record)
+                self._solved[username] = tasks
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"Invalid state file: {self.state_path}. Expected username: {{problem ID: Unix timestamp}}."
+                f"Invalid state file: {self.state_path}. Expected problem records with completed_at and difficulty."
             ) from exc
 
     def _key(self, username: str) -> str:
@@ -66,24 +80,30 @@ class TrackingStore:
         return set(self._solved[self._key(username)])
 
     def completion_times(self, username: str) -> dict[str, int]:
+        return {problem_id: task.completed_at for problem_id, task in self._solved[self._key(username)].items()}
+
+    def completed_problems(self, username: str) -> dict[str, Completion]:
         return self._solved[self._key(username)].copy()
 
-    def _save(self, solved: dict[str, dict[str, int]]) -> None:
-        payload = {username: dict(sorted(completions.items())) for username, completions in sorted(solved.items())}
+    def _save(self, solved: dict[str, dict[str, Completion]]) -> None:
+        payload = {
+            username: {problem_id: asdict(task) for problem_id, task in sorted(completions.items())}
+            for username, completions in sorted(solved.items())
+        }
         atomic_write(self.state_path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
         self._solved = solved
 
-    def add(self, username: str, completions: dict[str, int]) -> bool:
+    def add(self, username: str, completions: dict[str, Completion]) -> bool:
         username = validate_username(username)
         if self.contains(username):
             return False
         self._save({**self._solved, username: dict(completions)})
         return True
 
-    def record_solve(self, username: str, problem_id: str, completed_at: int) -> None:
+    def record_solve(self, username: str, problem_id: str, completed_at: int, difficulty: str) -> None:
         key = self._key(username)
         if problem_id not in self._solved[key]:
-            self._save({**self._solved, key: {**self._solved[key], problem_id: completed_at}})
+            self._save({**self._solved, key: {**self._solved[key], problem_id: Completion(completed_at, difficulty)}})
 
     def remove(self, username: str) -> bool:
         key = self._key(username)

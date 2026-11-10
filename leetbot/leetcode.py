@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 RECENT_LIMIT = 20
+DIFFICULTY_MARKERS = {"Easy": "🟢", "Medium": "🟡", "Hard": "🔴"}
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,50}\Z")
 SLUG_PATTERN = re.compile(r"[a-zA-Z0-9-]+\Z")
 

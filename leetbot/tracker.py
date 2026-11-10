@@ -7,8 +7,8 @@ import logging
 
 from telegram.error import TelegramError
 
-from .leetcode import LeetCodeClient, LeetCodeError, Question, validate_username
-from .storage import TrackingStore
+from .leetcode import DIFFICULTY_MARKERS, LeetCodeClient, LeetCodeError, Question, validate_username
+from .storage import Completion, TrackingStore
 
 logger = logging.getLogger(__name__)
 SendNotification = Callable[[str], Awaitable[None]]
@@ -19,7 +19,7 @@ def profile_link(username: str) -> str:
 
 
 def format_notification(username: str, question: Question) -> str:
-    badge = {"Easy": "🟢", "Medium": "🟡", "Hard": "🔴"}[question.difficulty]
+    badge = DIFFICULTY_MARKERS[question.difficulty]
     problem = f"#{escape(question.number)} · {escape(question.title)}"
     return (
         "🎉 <b>Problem solved!</b>\n\n"
@@ -44,8 +44,10 @@ class Tracker:
         activity = await self.leetcode.activity(username)
         completions = {}
         for slug, completed_at in activity.problem_times.items():
-            problem_id = (await self.leetcode.question(slug)).number
-            completions[problem_id] = min(completions.get(problem_id, completed_at), completed_at)
+            question = await self.leetcode.question(slug)
+            existing = completions.get(question.number)
+            if existing is None or completed_at < existing.completed_at:
+                completions[question.number] = Completion(completed_at, question.difficulty)
         async with self._lock:
             return self.store.add(activity.username, completions)
 
@@ -69,6 +71,6 @@ class Tracker:
                         if question.number in self.store.solved_ids(username):
                             continue
                         await self.send(format_notification(username, question))
-                        self.store.record_solve(username, question.number, completed_at)
+                        self.store.record_solve(username, question.number, completed_at, question.difficulty)
                 except (LeetCodeError, TelegramError, OSError) as exc:
                     logger.warning("Could not notify %s about %s: %s", username, slug, exc)

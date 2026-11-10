@@ -1,8 +1,9 @@
-"""Statistics over stored completion times, displayed in Moscow time."""
+"""Solve counts and chronological difficulty markers over stored completions."""
 
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from .leetcode import DIFFICULTY_MARKERS
 from .storage import TrackingStore
 from .tracker import profile_link
 
@@ -23,25 +24,43 @@ def statistics_messages(
     except OverflowError as exc:
         raise ValueError("N is outside the supported date range") from exc
     start_timestamp, end_timestamp = start.timestamp(), end.timestamp()
-    counts = [
+    users = [
         (
             username,
-            sum(start_timestamp <= completed_at <= end_timestamp for completed_at in store.completion_times(username).values()),
+            sorted(
+                (
+                    task
+                    for task in store.completed_problems(username).values()
+                    if task.completed_at > 0 and start_timestamp <= task.completed_at <= end_timestamp
+                ),
+                key=lambda task: task.completed_at,
+            ),
         )
         for username in store.users()
     ]
-    counts.sort(key=lambda item: (-item[1], item[0].casefold()))
+    users.sort(key=lambda item: len(item[1]), reverse=True)
     day_label = "day" if days == 1 else "days"
-    header = (
-        f"📊 <b>LeetCode statistics · last {days} {day_label}</b>\n"
-        f"🕒 {start.astimezone(MOSCOW):%d.%m.%Y %H:%M} → {end.astimezone(MOSCOW):%d.%m.%Y %H:%M} MSK\n"
-    )
-    if not counts:
-        return [header + "\nNobody is tracked yet. Use <code>/add username</code> to start."]
-    total = sum(count for _, count in counts)
-    footer = f"\n<b>Total: {total}</b> problems · <b>{len(counts)}</b> tracked users"
+    header = f"📊 <b>LeetCode statistics · last {days} {day_label}</b>"
+    if not users:
+        return [header + "\n\nNobody is tracked yet. Use <code>/add username</code> to start.\n\nTotal: 0 problems"]
+    total = sum(len(tasks) for _, tasks in users)
+    footer = f"\n\nTotal: {total} problems"
+    rows = []
+    for username, tasks in users:
+        if not tasks:
+            rows.append(f"• {profile_link(username)} · 🤡")
+            continue
+        markers = [DIFFICULTY_MARKERS[task.difficulty] for task in tasks]
+        rows.append(f"• {profile_link(username)} · {len(tasks)}")
+        # Short lines allow even very long histories to fit across Telegram messages.
+        rows.extend("  " + "".join(markers[offset : offset + 100]) for offset in range(0, len(markers), 100))
     messages = []
-    for offset in range(0, len(counts), 20):
-        rows = [f"• {profile_link(username)} — <b>{count}</b> solved" for username, count in counts[offset : offset + 20]]
-        messages.append(header + "\n" + "\n".join(rows) + "\n" + footer)
+    current = header + "\n"
+    for row in rows:
+        # UTF-16 units include emoji correctly; counting HTML too leaves extra margin.
+        if len((current + "\n" + row + footer).encode("utf-16-le")) // 2 > 3900:
+            messages.append(current)
+            current = header + "\n"
+        current += "\n" + row
+    messages.append(current + footer)
     return messages
