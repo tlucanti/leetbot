@@ -42,11 +42,12 @@ class Tracker:
         if self.store.contains(username):
             return False
         activity = await self.leetcode.activity(username)
-        problem_ids = set()
-        for slug in activity.problem_slugs:
-            problem_ids.add((await self.leetcode.question(slug)).number)
+        completions = {}
+        for slug, completed_at in activity.problem_times.items():
+            problem_id = (await self.leetcode.question(slug)).number
+            completions[problem_id] = min(completions.get(problem_id, completed_at), completed_at)
         async with self._lock:
-            return self.store.add(activity.username, problem_ids)
+            return self.store.add(activity.username, completions)
 
     async def remove(self, username: str) -> bool:
         async with self._lock:
@@ -59,7 +60,7 @@ class Tracker:
             except LeetCodeError as exc:
                 logger.warning("Cannot check %s: %s", username, exc)
                 continue
-            for slug in activity.problem_slugs:
+            for slug, completed_at in activity.problem_times.items():
                 try:
                     question = await self.leetcode.question(slug)
                     async with self._lock:
@@ -68,6 +69,6 @@ class Tracker:
                         if question.number in self.store.solved_ids(username):
                             continue
                         await self.send(format_notification(username, question))
-                        self.store.record_solve(username, question.number)
+                        self.store.record_solve(username, question.number, completed_at)
                 except (LeetCodeError, TelegramError, OSError) as exc:
                     logger.warning("Could not notify %s about %s: %s", username, slug, exc)

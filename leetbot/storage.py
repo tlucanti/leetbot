@@ -1,4 +1,4 @@
-"""A single JSON mapping of tracked usernames to solved problem IDs."""
+"""A single JSON mapping of usernames to problem IDs and completion times."""
 
 import json
 import os
@@ -27,24 +27,30 @@ class TrackingStore:
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True)
         self.state_path = directory / "state.json"
-        self._solved: dict[str, set[str]] = {}
+        self._solved: dict[str, dict[str, int]] = {}
         if not self.state_path.exists():
             self._save({})
             return
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
-                raise ValueError("Expected an object mapping usernames to problem ID lists")
-            for username, problem_ids in payload.items():
+                raise ValueError("Expected an object mapping usernames to completed problems")
+            for username, completions in payload.items():
                 if validate_username(username) != username or self.contains(username):
                     raise ValueError("Invalid or duplicate username")
-                if not isinstance(problem_ids, list) or any(
-                    not isinstance(problem_id, str) or not problem_id.strip() for problem_id in problem_ids
+                if not isinstance(completions, dict) or any(
+                    not isinstance(problem_id, str)
+                    or not problem_id.strip()
+                    or type(completed_at) is not int
+                    or completed_at < 0
+                    for problem_id, completed_at in completions.items()
                 ):
-                    raise ValueError("Problem IDs must be nonempty strings")
-                self._solved[username] = set(problem_ids)
+                    raise ValueError("Expected problem IDs mapped to Unix completion timestamps")
+                self._solved[username] = dict(completions)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid state file: {self.state_path}. Expected username: [problem IDs].") from exc
+            raise ValueError(
+                f"Invalid state file: {self.state_path}. Expected username: {{problem ID: Unix timestamp}}."
+            ) from exc
 
     def _key(self, username: str) -> str:
         name = validate_username(username)
@@ -57,23 +63,27 @@ class TrackingStore:
         return self._key(username) in self._solved
 
     def solved_ids(self, username: str) -> set[str]:
+        return set(self._solved[self._key(username)])
+
+    def completion_times(self, username: str) -> dict[str, int]:
         return self._solved[self._key(username)].copy()
 
-    def _save(self, solved: dict[str, set[str]]) -> None:
-        payload = {username: sorted(problem_ids) for username, problem_ids in sorted(solved.items())}
+    def _save(self, solved: dict[str, dict[str, int]]) -> None:
+        payload = {username: dict(sorted(completions.items())) for username, completions in sorted(solved.items())}
         atomic_write(self.state_path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
         self._solved = solved
 
-    def add(self, username: str, problem_ids: set[str]) -> bool:
+    def add(self, username: str, completions: dict[str, int]) -> bool:
         username = validate_username(username)
         if self.contains(username):
             return False
-        self._save({**self._solved, username: set(problem_ids)})
+        self._save({**self._solved, username: dict(completions)})
         return True
 
-    def record_solve(self, username: str, problem_id: str) -> None:
+    def record_solve(self, username: str, problem_id: str, completed_at: int) -> None:
         key = self._key(username)
-        self._save({**self._solved, key: self._solved[key] | {problem_id}})
+        if problem_id not in self._solved[key]:
+            self._save({**self._solved, key: {**self._solved[key], problem_id: completed_at}})
 
     def remove(self, username: str) -> bool:
         key = self._key(username)

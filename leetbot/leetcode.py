@@ -15,6 +15,7 @@ query RecentAccepted($username: String!, $limit: Int!) {
   matchedUser(username: $username) { username }
   recentAcSubmissionList(username: $username, limit: $limit) {
     titleSlug
+    timestamp
   }
 }
 """
@@ -49,7 +50,7 @@ def validate_username(username: str) -> str:
 @dataclass(frozen=True)
 class Activity:
     username: str
-    problem_slugs: tuple[str, ...]
+    problem_times: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -102,12 +103,21 @@ class LeetCodeClient:
             items = data["recentAcSubmissionList"]
             if not isinstance(items, list):
                 raise ValueError("Missing recent accepted submissions")
-            slugs = tuple(dict.fromkeys(item["titleSlug"] for item in items))
-            if any(not isinstance(slug, str) or not SLUG_PATTERN.fullmatch(slug) for slug in slugs):
-                raise ValueError("Invalid problem slug")
+            problem_times: dict[str, int] = {}
+            for item in items:
+                slug, raw_timestamp = item["titleSlug"], item["timestamp"]
+                if not isinstance(slug, str) or not SLUG_PATTERN.fullmatch(slug):
+                    raise ValueError("Invalid problem slug")
+                if type(raw_timestamp) not in (str, int):
+                    raise ValueError("Invalid completion time")
+                timestamp = int(raw_timestamp)
+                if timestamp < 0:
+                    raise ValueError("Invalid completion time")
+                # Keep the earliest accepted time visible in the recent feed for each problem.
+                problem_times[slug] = min(problem_times.get(slug, timestamp), timestamp)
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise LeetCodeError("LeetCode returned malformed user activity") from exc
-        return Activity(canonical_name, slugs)
+        return Activity(canonical_name, problem_times)
 
     async def question(self, slug: str) -> Question:
         if slug in self._questions:

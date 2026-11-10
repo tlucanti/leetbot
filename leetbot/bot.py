@@ -1,6 +1,7 @@
 """Telegram commands, configuration, and the application lifecycle."""
 
 from dataclasses import dataclass
+from datetime import time
 from html import escape
 import logging
 import os
@@ -19,6 +20,7 @@ from telegram.ext import (
 )
 
 from .leetcode import LeetCodeClient, LeetCodeError, UserNotFound, validate_username
+from .reports import MOSCOW, statistics_messages
 from .storage import TrackingStore
 from .tracker import Tracker, profile_link
 
@@ -32,11 +34,14 @@ Track public LeetCode profiles and celebrate new solves in the configured group.
 ➕ /add &lt;username&gt; — track a user here
 ➖ /remove &lt;username&gt; — stop tracking a user here
 📋 /list — show this group's tracked users
+📊 /stat [N] — solves over the past N days (default: 1)
 ❔ /help — show these commands
 
 Example: <code>/add leetcode</code>
 
 Existing recent solves are skipped when tracking starts. Repeat submissions to a problem already observed in this group are skipped too.
+
+A daily report for the previous 24 hours is posted at 08:00 Moscow time.
 
 Use these commands in your group. If Telegram does not forward a command, address it to the bot: <code>/add@YourBot username</code>."""
 
@@ -165,6 +170,30 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await get_tracker(context).poll()
 
 
+async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_group(update, context):
+        return
+    try:
+        if len(context.args) > 1:
+            raise ValueError("Expected at most one argument")
+        days = int(context.args[0]) if context.args else 1
+        messages = statistics_messages(get_tracker(context).store, days)
+    except ValueError:
+        await update.effective_message.reply_text(
+            "Usage: <code>/stat [N]</code> — N must be a positive integer within the supported date range.\n"
+            "Default: <code>/stat 1</code>. Example: <code>/stat 7</code>."
+        )
+        return
+    for text in messages:
+        await update.effective_message.reply_text(text)
+
+
+async def daily_statistics_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    tracker = get_tracker(context)
+    for text in statistics_messages(tracker.store):
+        await tracker.send(text)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     # HTTP client INFO logging is disabled in main to keep the bot token out of URLs in logs.
     error = context.error
@@ -187,7 +216,13 @@ def build_application(config: Config) -> Application:
 
     async def post_init(application: Application) -> None:
         await application.bot.set_my_commands(
-            [("add", "Track a LeetCode user"), ("remove", "Stop tracking a user"), ("list", "List tracked users"), ("help", "Show help")]
+            [
+                ("add", "Track a LeetCode user"),
+                ("remove", "Stop tracking a user"),
+                ("list", "List tracked users"),
+                ("stat", "Statistics for the past N days (default: 1)"),
+                ("help", "Show help"),
+            ]
         )
 
     async def post_shutdown(application: Application) -> None:
@@ -212,6 +247,7 @@ def build_application(config: Config) -> Application:
     application.add_handler(CommandHandler("add", add_command))
     application.add_handler(CommandHandler("remove", remove_command))
     application.add_handler(CommandHandler("list", list_command))
+    application.add_handler(CommandHandler("stat", stat_command))
     application.add_error_handler(error_handler)
     if application.job_queue is None:
         raise RuntimeError('Install the job queue extra: pip install -r requirements.txt')
@@ -222,6 +258,12 @@ def build_application(config: Config) -> Application:
             first=1,
             name="leetcode-poll",
             job_kwargs={"max_instances": 1, "coalesce": True},
+        )
+        application.job_queue.run_daily(
+            daily_statistics_job,
+            time=time(hour=8, tzinfo=MOSCOW),
+            name="daily-statistics",
+            job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 300},
         )
     return application
 
